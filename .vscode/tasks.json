@@ -1,0 +1,50 @@
+{
+    // Tasks beziehen sich auf den Ordner der gerade geoeffneten Datei
+    // (z. B. firmware/<name>/main.cpp). Laufen in Git Bash, weil die
+    // libDaisy-Makefiles POSIX-Tools (rm, mkdir) erwarten.
+    "version": "2.0.0",
+    "options": {
+        "shell": {
+            "executable": "C:\\Program Files\\Git\\bin\\bash.exe",
+            "args": ["-c"]
+        }
+    },
+    "tasks": [
+        {
+            "label": "Build",
+            "type": "shell",
+            "command": "make",
+            "options": { "cwd": "${fileDirname}" },
+            "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${fileDirname}"] },
+            "group": { "kind": "build", "isDefault": true }
+        },
+        {
+            "label": "Build + Program (DFU)",
+            "type": "shell",
+            "command": "make && make program-dfu",
+            "options": { "cwd": "${fileDirname}" },
+            "problemMatcher": { "base": "$gcc", "fileLocation": ["autoDetect", "${fileDirname}"] }
+        },
+        {
+            "label": "Program (ST-Link)",
+            "type": "shell",
+            "command": "make program",
+            "options": { "cwd": "${fileDirname}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": "make clean",
+            "options": { "cwd": "${fileDirname}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Libraries",
+            "type": "shell",
+            "command": "make libs -j8",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"]
+        }
+    ]
+}

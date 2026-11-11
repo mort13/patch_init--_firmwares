@@ -1,0 +1,54 @@
+{
+    "configurations": [
+        {
+            "name": "Daisy patch.init()",
+            "includePath": [
+                "${fileDirname}",
+                "${workspaceFolder}/firmware/shared",
+                "${workspaceFolder}/lib",
+                "${workspaceFolder}/lib/libDaisy",
+                "${workspaceFolder}/lib/libDaisy/src",
+                "${workspaceFolder}/lib/libDaisy/src/sys",
+                "${workspaceFolder}/lib/libDaisy/src/usbd",
+                "${workspaceFolder}/lib/libDaisy/src/usbh",
+                "${workspaceFolder}/lib/libDaisy/Drivers/CMSIS_5/CMSIS/Core/Include",
+                "${workspaceFolder}/lib/libDaisy/Drivers/CMSIS-DSP/Include",
+                "${workspaceFolder}/lib/libDaisy/Drivers/CMSIS-Device/ST/STM32H7xx/Include",
+                "${workspaceFolder}/lib/libDaisy/Drivers/STM32H7xx_HAL_Driver/Inc",
+                "${workspaceFolder}/lib/libDaisy/Drivers/STM32H7xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/ST/STM32_USB_Device_Library/Core/Inc",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/Patched/ST/STM32_USB_Device_Library/Class/CDC/Inc",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/ST/STM32_USB_Host_Library/Core/Inc",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/ST/STM32_USB_Host_Library/Class/MSC/Inc",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/ST/STM32_USB_Host_Library/Class/MIDI/Inc",
+                "${workspaceFolder}/lib/libDaisy/Middlewares/Third_Party/FatFs/src",
+                "${workspaceFolder}/lib/DaisySP/Source/**",
+                "${workspaceFolder}/lib/DaisySP/DaisySP-LGPL/Source/**"
+            ],
+            "defines": [
+                "CORE_CM7",
+                "STM32H750xx",
+                "STM32H750IB",
+                "ARM_MATH_CM7",
+                "flash_layout",
+                "HSE_VALUE=16000000",
+                "USE_HAL_DRIVER",
+                "USE_FULL_LL_DRIVER",
+                "USE_DAISYSP_LGPL"
+            ],
+            "compilerPath": "C:\\Program Files\\DaisyToolchain\\bin\\arm-none-eabi-g++.exe",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "gcc-arm",
+            "compilerArgs": [
+                "-mcpu=cortex-m7",
+                "-mfpu=fpv5-d16",
+                "-mfloat-abi=hard",
+                "-mthumb",
+                "-fno-exceptions",
+                "-fno-rtti"
+            ]
+        }
+    ],
+    "version": 4
+}
