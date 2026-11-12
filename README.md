@@ -11,10 +11,20 @@ lib/                      Libraries, gegen die gebaut wird (Git-Submodule)
   stmlib/                 Mutable-Instruments-Hilfsbibliothek (pichenettes/stmlib)
 ref/                      Nur zum Lesen/Nachvollziehen (flache Submodule)
   DaisyExamples/          offizielle Beispiele, u. a. ref/DaisyExamples/patch_sm/
+  eurorack/               Mutable-Instruments-Quellen (pichenettes/eurorack)
 firmware/
   common.mk               gemeinsame Build-Einstellungen
   shared/patch_init.h     Pinbelegung des patch.init() mit sprechenden Namen
+  shared/droid_link*.h    DroidLink-Empfänger: 4 MIDI-Stimmen vom DROID über 1 CV + 1 Gate
+  shared/layered_knob.h   Knob mit mehreren Ebenen und Catch-up (Beads, Rings)
+  shared/clock_detector.h „Gate-Eingang gesteckt?“-Schätzung über Flanken (Beads, Rings)
   template/               Startpunkt für neue Firmwares
+  beads/                  Port von Mutable Instruments Beads (Bedienung: firmware/beads/README.md)
+  rings/                  Port von Mutable Instruments Rings (Bedienung: firmware/rings/README.md)
+  droid_link_monitor/     Testfirmware für DroidLink (LED-Status, Sinus-Testton, USB-Statistik)
+droid/                    DROID-Patches, u. a. droid_link.ini (DroidLink-Sender)
+docs/droid_link.md        DroidLink: Verkabelung, Einbau in eigene Firmwares, Protokoll
+tests/                    PC-Tests (make -C tests, braucht g++ oder clang++)
 scripts/setup.sh          Submodule initialisieren + Libraries bauen
 ```
 

@@ -11,3 +11,7 @@
 	path = ref/DaisyExamples
 	url = https://github.com/daisyaudio/DaisyExamples
 	shallow = true
+[submodule "ref/eurorack"]
+	path = ref/eurorack
+	url = https://github.com/pichenettes/eurorack
+	shallow = true
