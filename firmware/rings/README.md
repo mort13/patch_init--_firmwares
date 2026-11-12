@@ -92,7 +92,7 @@ MODEL wählt den Effekt (Tabelle oben). Der Audio-Eingang hat hier keine Wirkung
 
 ### DroidLink (MIDI vom DROID)
 
-Verkabelung und DROID-Patch wie in [docs/droid_link.md](../../docs/droid_link.md): DROID O7 → **CV 4**, O8 → **Gate In 2**.
+Verkabelung und DROID-Patch wie in [docs/droid_link.md](../../docs/droid_link.md): DROID O7 → **CV 4** (Buchse CV_8), O8 → **Gate In 2** (Buchse B9).
 Es gibt nichts einzuschalten. Sobald gültige DroidLink-Rahmen ankommen, blinkt die LED 3× kurz und Rings spielt die MIDI-Noten.
 Ohne Takt (Kabel gezogen, DROID-Patch gewechselt) ist Rings nach 50 ms wieder im Normalbetrieb.
 

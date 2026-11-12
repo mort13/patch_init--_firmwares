@@ -41,14 +41,98 @@ uint32_t   flash  = 0; // Callbacks, die die LED noch hell bleibt
 uint32_t   blink  = 0; // laufender Zaehler fuers Blinken
 float      cb_rate = 1.f;
 
-/** Ab dieser Abweichung (V) zwischen Abtastwert und Slotende ist der Takt zu schnell */
-constexpr float kSettleWarn = 0.002f;
+/** Ab dieser Abweichung (V) zwischen Abtastwert und Wert ein Viertel Slot
+ *  frueher ist der Takt zu schnell. Mit 8-fachem ADC-Oversampling liegt das
+ *  Rauschen allein bei ca. 3-4 mV (gemessen). */
+constexpr float kSettleWarn = 0.010f;
+
+/**
+ * Rohmitschnitt (Diagnose): ab einer steigenden Taktflanke 30 ms lang
+ *  - Takt-Pegel und Spannung an CV_8 mit 20 kHz (aus dem Timer-Interrupt)
+ *  - Audio In R mit 48 kHz (aus dem Audio-Callback), z. B. O7 per Mult dort
+ * Die Hauptschleife gibt alle 5 s einen Mitschnitt ueber USB aus.
+ */
+constexpr int kCapTicks = 600;  // 30 ms bei 20 kHz
+constexpr int kCapAudio = 1440; // 30 ms bei 48 kHz
+enum CapState
+{
+    CAP_IDLE,
+    CAP_ARMED,
+    CAP_RECORDING,
+};
+volatile int cap_state     = CAP_IDLE;
+volatile int cap_tick_pos  = 0;
+volatile int cap_audio_pos = 0;
+bool         cap_prev_gate = false;
+int16_t      cap_mv[kCapTicks];
+uint8_t      cap_gate[kCapTicks];
+int16_t      cap_audio[kCapAudio]; // Audio In R x 10000 (1.0 = Vollausschlag)
+
+void CaptureTap(void*, bool gate, float volts)
+{
+    if(cap_state == CAP_ARMED && gate && !cap_prev_gate)
+    {
+        cap_tick_pos  = 0;
+        cap_audio_pos = 0;
+        cap_state     = CAP_RECORDING;
+    }
+    cap_prev_gate = gate;
+    if(cap_state == CAP_RECORDING && cap_tick_pos < kCapTicks)
+    {
+        cap_mv[cap_tick_pos]   = int16_t(volts * 1000.f);
+        cap_gate[cap_tick_pos] = gate ? 1 : 0;
+        cap_tick_pos           = cap_tick_pos + 1;
+    }
+}
+
+void PrintCapture()
+{
+    hw.PrintLine("cap begin  cv: 20 kHz in mV ab steigender Flanke, audio: 48 kHz x10000");
+    char line[200];
+    for(int i = 0; i < kCapTicks; i += 50)
+    {
+        int n = 0;
+        for(int k = 0; k < 50; k++)
+            line[n++] = cap_gate[i + k] ? '1' : '0';
+        line[n] = 0;
+        hw.PrintLine("g %03d %s", i, line);
+        System::Delay(3);
+    }
+    for(int i = 0; i < kCapTicks; i += 20)
+    {
+        int n = 0;
+        for(int k = 0; k < 20; k++)
+            n += snprintf(line + n, sizeof(line) - n, " %d", cap_mv[i + k]);
+        hw.PrintLine("v %03d%s", i, line);
+        System::Delay(3);
+    }
+    for(int i = 0; i < kCapAudio; i += 24)
+    {
+        int n = 0;
+        for(int k = 0; k < 24; k++)
+            n += snprintf(line + n, sizeof(line) - n, " %d", cap_audio[i + k]);
+        hw.PrintLine("a %04d%s", i, line);
+        System::Delay(3);
+    }
+    hw.PrintLine("cap end");
+}
 
 void AudioCallback(AudioHandle::InputBuffer  in,
                    AudioHandle::OutputBuffer out,
                    size_t                    size)
 {
     hw.ProcessAllControls();
+
+    if(cap_state == CAP_RECORDING)
+    {
+        for(size_t i = 0; i < size && cap_audio_pos < kCapAudio; i++)
+        {
+            cap_audio[cap_audio_pos] = int16_t(IN_R[i] * 10000.f);
+            cap_audio_pos            = cap_audio_pos + 1;
+        }
+        if(cap_audio_pos >= kCapAudio && cap_tick_pos >= kCapTicks)
+            cap_state = CAP_IDLE;
+    }
 
     const droid_link::State s       = droid.GetState();
     const droid_link::Stats st      = droid.GetStats();
@@ -122,27 +206,52 @@ int main(void)
 
     // Default: CV In 4 = Daten, Gate In 2 = Takt (siehe PatchInitLink::Config)
     droid.Init(hw);
+    droid.SetTap(&CaptureTap, nullptr);
     droid.Start();
 
     hw.StartLog(false);
     hw.StartAudio(AudioCallback);
 
+    uint32_t seconds = 0;
     while(1)
     {
         System::Delay(1000);
+
+        // Alle 5 s einen Rohmitschnitt aufnehmen und ausgeben
+        if(++seconds % 5 == 0)
+        {
+            cap_state = CAP_ARMED;
+            for(int i = 0; i < 100 && cap_state != CAP_IDLE; i++)
+                System::Delay(1);
+            if(cap_state == CAP_IDLE)
+                PrintCapture();
+            else
+            {
+                cap_state = CAP_IDLE;
+                hw.PrintLine("cap timeout (kein Takt?)");
+            }
+        }
         const droid_link::Stats st = droid.GetStats();
         const droid_link::State s  = droid.GetState();
-        hw.PrintLine("lock %d  slots/s " FLT_FMT(1) "  frame %d  ok %u  bad %u  lost %u  "
+        hw.PrintLine("lock %d  slots/s " FLT_FMT(1) "  frame %d  ok %u  bad %u  drift %u  lost %u  "
                      "gain " FLT_FMT(4) "  offset(mV) " FLT_FMT(1) "  settle(mV) " FLT_FMT(2),
                      s.locked ? 1 : 0,
                      FLT_VAR(1, st.slot_hz),
                      st.frame_slots,
                      (unsigned)st.frames_ok,
                      (unsigned)st.frames_bad,
+                     (unsigned)st.frames_drift,
                      (unsigned)st.sync_losses,
                      FLT_VAR(4, st.gain),
                      FLT_VAR(1, st.offset * 1000.f),
                      FLT_VAR(2, st.settle_error * 1000.f));
+        // Rohdiagnose: ticks muss um ca. 20000 pro Sekunde steigen (Timer
+        // laeuft), falls um die Slotrate (Takt kommt an B9 an).
+        hw.PrintLine("  diag ticks %u  falls %u  gate(B9) %d  cv(CV_8) " FLT_FMT(3) " V",
+                     (unsigned)st.ticks,
+                     (unsigned)st.falls,
+                     st.gate ? 1 : 0,
+                     FLT_VAR(3, st.volts));
         for(int v = 0; v < droid_link::kNumVoices; v++)
         {
             const droid_link::Voice& vo = s.voice[v];

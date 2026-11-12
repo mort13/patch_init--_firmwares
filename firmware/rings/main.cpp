@@ -128,6 +128,41 @@ int   strum_pulse     = 0;
 int   applied_model   = -1;
 int   applied_poly    = -1;
 
+#ifdef RINGS_DEBUG_CPU
+/** Debug: Protokoll aller Anschlaege. Der Audio-Callback schreibt, die
+ *  Hauptschleife gibt aus (ein Schreiber, ein Leser). */
+enum StrikeSource : uint8_t
+{
+    SRC_MIDI,
+    SRC_GATE,
+    SRC_BUTTON,
+    SRC_INTERNAL,
+};
+struct StrikeEvent
+{
+    uint32_t ms;
+    float    note; // MIDI-Note wie vom DROID dekodiert
+    float    velocity;
+    int8_t   voice; // Rings-Stimme, -1 = aktive Stimme
+    uint8_t  source;
+};
+constexpr uint32_t kNumStrikeEvents = 64;
+StrikeEvent        strike_log[kNumStrikeEvents];
+volatile uint32_t  strike_log_write = 0;
+
+inline void LogStrike(uint32_t ms, int voice, uint8_t source, float note, float velocity)
+{
+    StrikeEvent& e = strike_log[strike_log_write % kNumStrikeEvents];
+    e.ms           = ms;
+    e.note         = note;
+    e.velocity     = velocity;
+    e.voice        = int8_t(voice);
+    e.source       = source;
+    __DMB();
+    strike_log_write = strike_log_write + 1;
+}
+#endif
+
 /** Modell / Polyphonie nur bei Aenderung setzen: Part::set_polyphony()
  *  initialisiert die Resonatoren neu. */
 void ApplyModelAndPolyphony()
@@ -201,7 +236,8 @@ void AudioCallback(AudioHandle::InputBuffer  in,
     performance_state.internal_exciter = !exciter_detector.active();
 
     // STRUM-Gate und Taster. Ohne DroidLink kommt der Strummer noch dazu.
-    const bool manual_strum = performance_state.strum || ui.strum_pressed();
+    const bool gate_strum   = performance_state.strum;
+    const bool manual_strum = gate_strum || ui.strum_pressed();
     const bool midi_strike  = droid_voices.strike_voice() >= 0;
     if(linked)
     {
@@ -257,6 +293,26 @@ void AudioCallback(AudioHandle::InputBuffer  in,
         }
         part.Process(performance_state, patch, input, odd, even, size);
     }
+
+#ifdef RINGS_DEBUG_CPU
+    if(performance_state.strum)
+    {
+        if(linked && midi_strike)
+            LogStrike(now,
+                      droid_voices.strike_voice(),
+                      SRC_MIDI,
+                      kDroidLinkTonic + droid_voices.notes()[droid_voices.strike_voice()],
+                      droid_voices.strike_velocity());
+        else
+            LogStrike(now,
+                      -1,
+                      ui.strum_pressed() ? SRC_BUTTON : (gate_strum ? SRC_GATE : SRC_INTERNAL),
+                      0.f,
+                      1.f);
+    }
+#else
+    (void)gate_strum;
+#endif
 
     // Stereo-Breite: 1 = ODD links / EVEN rechts wie das Original,
     // 0 = beide Ausgaenge bekommen den Mono-Mix (im Original: nur ODD gesteckt).
@@ -385,11 +441,52 @@ int main(void)
 #ifdef RINGS_DEBUG_CPU
         if(now - last_cpu_report >= 1000)
         {
-            last_cpu_report = now;
-            hw.PrintLine("CPU avg " FLT_FMT3 "%%  max " FLT_FMT3 "%%",
+            last_cpu_report             = now;
+            const droid_link::Stats st  = droid.GetStats();
+            const droid_link::State lnk = droid.GetState();
+            hw.PrintLine("CPU avg " FLT_FMT3 "%%  max " FLT_FMT3 "%%  link %d  ok %lu  bad %lu  drift %lu  lost %lu  settle(mV) " FLT_FMT(2),
                          FLT_VAR3(cpu_meter.GetAvgCpuLoad() * 100.f),
-                         FLT_VAR3(cpu_meter.GetMaxCpuLoad() * 100.f));
+                         FLT_VAR3(cpu_meter.GetMaxCpuLoad() * 100.f),
+                         lnk.locked ? 1 : 0,
+                         (unsigned long)st.frames_ok,
+                         (unsigned long)st.frames_bad,
+                         (unsigned long)st.frames_drift,
+                         (unsigned long)st.sync_losses,
+                         FLT_VAR(2, st.settle_error * 1000.f));
             cpu_meter.Reset();
+        }
+
+        // Anschlaege sofort ausgeben
+        static uint32_t strike_log_read = 0;
+        const uint32_t  written         = strike_log_write;
+        if(written - strike_log_read > kNumStrikeEvents)
+        {
+            hw.PrintLine("  (%lu Anschlaege verpasst)",
+                         (unsigned long)(written - strike_log_read - kNumStrikeEvents));
+            strike_log_read = written - kNumStrikeEvents;
+        }
+        while(strike_log_read != written)
+        {
+            const StrikeEvent e = strike_log[strike_log_read % kNumStrikeEvents];
+            strike_log_read++;
+            if(e.source == SRC_MIDI)
+            {
+                const float frac  = e.note - roundf(e.note);
+                const bool  ghost = e.note < 19.5f || e.note > 100.5f || fabsf(frac) > 0.15f;
+                hw.PrintLine("  %lu ms  strike midi  voice %d  note " FLT_FMT(2) "  vel " FLT_FMT(2) "%s",
+                             (unsigned long)e.ms,
+                             e.voice + 1,
+                             FLT_VAR(2, e.note),
+                             FLT_VAR(2, e.velocity),
+                             ghost ? "  <- GEIST?" : "");
+            }
+            else
+            {
+                const char* src = e.source == SRC_BUTTON ? "taster"
+                                  : e.source == SRC_GATE ? "strum-gate"
+                                                         : "intern";
+                hw.PrintLine("  %lu ms  strike %s", (unsigned long)e.ms, src);
+            }
         }
 #else
         (void)last_cpu_report;

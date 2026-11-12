@@ -7,8 +7,9 @@
  * (X7) in einen Zeitmultiplex-Strom um, das patch.init() dekodiert ihn hier.
  * Vollstaendige Spezifikation: docs/droid_link.md
  *
- *   Takt (Gate In):  Rechteck. Steigende Flanke = naechster Slot beginnt,
- *                    fallende Flanke = Abtastzeitpunkt (Wert ist eingeschwungen).
+ *   Takt (Gate In):  Rechteck. Steigende Flanke = naechster Slot beginnt.
+ *                    Abgetastet wird kurz davor, am Ende des alten Slots
+ *                    (Wert ist eingeschwungen). Die Pulsbreite ist beliebig.
  *   Daten (CV In):   ein Spannungswert pro Slot. Ein Rahmen besteht aus
  *
  *     Slot 0           SYNC  +4.0 V  einziger Wert ueber +3.75 V -> Rahmenanfang
@@ -51,6 +52,10 @@ constexpr float kOffThreshold  = -3.75f; ///< kalibrierter NOTE-Wert darunter = 
 constexpr float kRefTolerance  = 0.4f;   ///< max. Abweichung des REF-Slots (roh)
 constexpr float kMaxGainError  = 0.1f;   ///< max. +-10 % Verstaerkungsfehler des Eingangs
 constexpr float kSlotMargin    = 0.25f;  ///< erlaubte Ueberschreitung von +-3.5 V
+/** Hoechstens so viel (roh, V) darf sich ein Slot kurz vor dem Abtasten noch
+ *  bewegen, sonst wird der Rahmen verworfen. Rauschen: ca. 0.004 V; eine
+ *  Geister-Note braucht >= 0.25 V Fehler. */
+constexpr float kMaxDrift = 0.04f;
 
 /** Nach so vielen fehlerhaften Rahmen in Folge gilt die Verbindung als verloren */
 constexpr int kMaxBadFrames = 4;
@@ -90,21 +95,29 @@ struct State
 struct Stats
 {
     uint32_t frames_ok   = 0;
-    uint32_t frames_bad  = 0; ///< verworfene Rahmen (Laenge, REF, Bereich)
+    uint32_t frames_bad  = 0; ///< verworfene Rahmen (Laenge, REF, Bereich, Drift)
+    uint32_t frames_drift = 0; ///< davon: ein Slot war zum Abtastzeitpunkt noch in Bewegung
     uint32_t sync_losses = 0; ///< Verbindung verloren (Timeout oder zu viele Fehler)
     int      frame_slots = 0; ///< Laenge des letzten gueltigen Rahmens
     /** Kalibrierung: Spannung = (Messwert - offset) * gain + kRefVolts */
     float gain   = 1.f;
     float offset = 0.f;
-    /** Mittlere Differenz zwischen Abtastwert (75 % des Slots) und Wert am
-     *  Slotende in Volt. Grobe Diagnose: ueber ca. 0.002 V schwingt der
-     *  CV-Eingang nicht rechtzeitig ein -> am DROID [lfo] hz verringern.
-     *  Rauschen allein ergibt typisch < 0.001 V. */
+    /** Mittlere Differenz zwischen Abtastwert und dem Vergleichswert kurz
+     *  davor (siehe Receiver), in Volt. Rauschen allein ergibt ca.
+     *  0.003-0.004 V; deutlich mehr: der Takt ist zu schnell -> am DROID
+     *  [lfo] hz verringern. */
     float settle_error = 0.f;
     /** Gemessene Slotrate in Hz (nur ueber Receiver, 0 = kein Takt) */
     float slot_hz = 0.f;
     /** true, solange am Takt-Eingang Flanken ankommen (nur ueber Receiver) */
     bool clock = false;
+    /** Rohdiagnose (nur ueber Receiver): Abfragen seit Start (laeuft der
+     *  Timer?), gezaehlte fallende Taktflanken, aktueller Pegel am
+     *  Takt-Eingang und momentane Spannung am Daten-Eingang in Volt */
+    uint32_t ticks = 0;
+    uint32_t falls = 0;
+    bool     gate  = false;
+    float    volts = 0.f;
 };
 
 /** Reiner Protokoll-Decoder ohne Zeitbezug und ohne Hardware.
@@ -121,10 +134,11 @@ class Decoder
         bad_in_row_  = 0;
         calibrated_  = false;
         last_sample_ = 0.f;
+        drift_       = false;
     }
 
-    /** An jeder fallenden Taktflanke mit der gemessenen, noch
-     *  unkalibrierten Spannung (Volt) aufrufen. */
+    /** Einmal pro Slot mit der gemessenen, noch unkalibrierten Spannung (Volt)
+     *  am Slotende aufrufen. */
     void OnSample(float volts)
     {
         last_sample_ = volts;
@@ -134,6 +148,7 @@ class Decoder
                 return; // derselbe SYNC-Slot doppelt abgetastet (Stoerimpuls)
             if(pos_ > 0)
                 EndFrame(pos_);
+            drift_  = false;
             buf_[0] = volts;
             pos_    = 1;
             return;
@@ -150,14 +165,19 @@ class Decoder
         buf_[pos_++] = volts;
     }
 
-    /** Optional: Spannung kurz vor der naechsten steigenden Flanke, also am
-     *  Ende desselben Slots. Dient nur der Diagnose (Stats::settle_error). */
+    /** Optional, nach OnSample(): Spannung kurz vorher im selben Slot.
+     *  Weicht sie um mehr als kMaxDrift ab, war der Slot beim Abtasten noch in
+     *  Bewegung (z. B. schon auf dem Weg zum naechsten Slot). Dann wird der
+     *  ganze Rahmen verworfen - so entstehen keine Geister-Noten aus einem
+     *  halb gelesenen "Gate aus". Liefert ausserdem Stats::settle_error. */
     void OnSlotEnd(float volts)
     {
         float err = volts - last_sample_;
         if(err < 0.f)
             err = -err;
         stats_.settle_error += (err - stats_.settle_error) * (1.f / 64.f);
+        if(err > kMaxDrift && pos_ > 0)
+            drift_ = true;
     }
 
     /** Takt ausgefallen (Kabel gezogen, DROID-Patch gewechselt...):
@@ -181,6 +201,12 @@ class Decoder
 
     void EndFrame(int len)
     {
+        if(drift_)
+        {
+            stats_.frames_drift++;
+            BadFrame();
+            return;
+        }
         if(len < kMinSlots || len > kMaxSlots)
         {
             BadFrame();
@@ -325,15 +351,32 @@ class Decoder
     int   bad_in_row_     = 0;
     bool  calibrated_     = false;
     float last_sample_    = 0.f;
+    bool  drift_          = false; ///< ein Slot dieses Rahmens war noch in Bewegung
 };
 
 /** Flankenlogik: wird mit konstanter Rate (poll_hz) mit dem aktuellen
  *  Zustand des Takt-Eingangs und der Spannung am Daten-Eingang aufgerufen.
  *
- *   fallende Flanke   -> Decoder::OnSample()  (Abtastzeitpunkt, ~75 % des Slots)
- *   steigende Flanke  -> Decoder::OnSlotEnd() mit dem Wert von 2 Ticks vorher
- *                        (sicher noch derselbe Slot, nur Diagnose)
- *   keine Flanke fuer timeout_ms -> Decoder::OnTimeout()
+ *   steigende Flanke  -> der vorige Slot ist zu Ende:
+ *                        Decoder::OnSample() mit dem Wert von kEndTicks vorher
+ *                        (spaet im Slot, eingeschwungen, aber mit Abstand zum
+ *                        naechsten Slot), dann Decoder::OnSlotEnd() mit dem
+ *                        Wert kRefTicks davor (Drift-Pruefung)
+ *   fallende Flanke   -> wird nur gezaehlt (Stats::falls)
+ *   keine steigende Flanke fuer timeout_ms -> Decoder::OnTimeout()
+ *
+ * Gemessen am patch.init() mit DROID:
+ *  - Die DROID-Ausgaenge glaetten mit ca. 0,2 ms Zeitkonstante, der ADC
+ *    liefert je nach Oversampling nur alle 0,26-1,05 ms einen neuen Wert.
+ *  - Die Daten aendern sich manchmal schon deutlich vor der erkannten
+ *    Taktflanke (vermutlich aktualisiert der DROID O7 und O8 nicht ganz
+ *    gleichzeitig). Mit 0,2 ms Abstand kamen noch Geister-Noten: ein
+ *    "Gate aus" (-4 V), halb oder ganz auf dem Weg zum naechsten Slot
+ *    gelesen, ergibt eine zufaellige Tonhoehe. Deshalb 0,5 ms Abstand plus
+ *    Drift-Pruefung, und der DROID-Takt auf 400 Hz fuer genug Einschwingzeit.
+ *  - Die Pulsbreite des Takts spielt keine Rolle.
+ * Der Slot muss mindestens kEndTicks + kRefTicks + 2 Ticks lang sein
+ * (bei 20 kHz: 0,9 ms).
  */
 class Receiver
 {
@@ -344,11 +387,12 @@ class Receiver
         poll_hz_       = poll_hz;
         timeout_ticks_ = static_cast<uint32_t>(timeout_ms * 0.001f * float(poll_hz));
         tick_          = 0;
-        last_fall_     = 0;
-        have_fall_     = false;
+        last_rise_     = 0;
+        have_rise_     = false;
         prev_gate_     = false;
         timed_out_     = true;
         slot_ticks_    = 0.f;
+        falls_         = 0;
         for(float& h : hist_)
             h = 0.f;
     }
@@ -356,30 +400,32 @@ class Receiver
     void Tick(bool gate, float volts)
     {
         tick_++;
-        hist_[tick_ & 3u] = volts;
+        hist_[tick_ & kHistMask] = volts;
 
-        if(prev_gate_ && !gate)
+        if(!prev_gate_ && gate)
         {
-            decoder_.OnSample(volts);
-            const uint32_t d = tick_ - last_fall_;
-            if(!timed_out_)
+            const uint32_t d = tick_ - last_rise_;
+            if(have_rise_ && d > kEndTicks + kRefTicks + 1)
+            {
+                decoder_.OnSample(hist_[(tick_ - kEndTicks) & kHistMask]);
+                decoder_.OnSlotEnd(hist_[(tick_ - kEndTicks - kRefTicks) & kHistMask]);
                 slot_ticks_ = slot_ticks_ > 0.f ? slot_ticks_ + 0.05f * (float(d) - slot_ticks_)
                                                 : float(d);
-            last_fall_ = tick_;
-            have_fall_ = true;
+            }
+            last_rise_ = tick_;
+            have_rise_ = true;
             timed_out_ = false;
         }
-        else if(!prev_gate_ && gate)
+        else if(prev_gate_ && !gate)
         {
-            if(have_fall_ && tick_ - last_fall_ >= 3)
-                decoder_.OnSlotEnd(hist_[(tick_ - 2) & 3u]);
-            have_fall_ = false;
+            falls_++;
         }
         prev_gate_ = gate;
 
-        if(!timed_out_ && tick_ - last_fall_ > timeout_ticks_)
+        if(!timed_out_ && tick_ - last_rise_ > timeout_ticks_)
         {
             timed_out_  = true;
+            have_rise_  = false;
             slot_ticks_ = 0.f;
             decoder_.OnTimeout();
         }
@@ -392,18 +438,33 @@ class Receiver
         Stats s   = decoder_.stats();
         s.slot_hz = slot_ticks_ > 0.f ? float(poll_hz_) / slot_ticks_ : 0.f;
         s.clock   = !timed_out_;
+        s.ticks   = tick_;
+        s.falls   = falls_;
+        s.gate    = prev_gate_;
+        s.volts   = hist_[tick_ & kHistMask];
         return s;
     }
 
   private:
+    /** Abtastwert = so viele Ticks vor der erkannten steigenden Flanke
+     *  (0,5 ms bei 20 kHz). 2 und 4 Ticks ergaben Geister-Noten. */
+    static constexpr uint32_t kEndTicks = 10;
+    /** Vergleichswert fuer die Drift-Pruefung so viele Ticks vor dem
+     *  Abtastwert (0,3 ms): laenger als ein ADC-Takt bei 8-fachem
+     *  Oversampling (0,26 ms), also sicher eine andere Wandlung. */
+    static constexpr uint32_t kRefTicks = 6;
+    static constexpr uint32_t kHistMask = 31; // hist_ hat 32 Eintraege
+    static_assert(kEndTicks + kRefTicks <= kHistMask, "hist_ zu kurz");
+
     Decoder  decoder_;
     uint32_t poll_hz_       = 20000;
     uint32_t timeout_ticks_ = 1000;
     uint32_t tick_          = 0;
-    uint32_t last_fall_     = 0;
-    float    hist_[4]       = {};
+    uint32_t last_rise_     = 0;
+    float    hist_[32]      = {};
     float    slot_ticks_    = 0.f;
-    bool     have_fall_     = false;
+    uint32_t falls_         = 0;
+    bool     have_rise_     = false;
     bool     prev_gate_     = false;
     bool     timed_out_     = true;
 };

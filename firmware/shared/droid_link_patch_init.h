@@ -60,6 +60,12 @@ class PatchInitLink
          *  unterbrechen kann. Nur abschalten, wenn die Blockgroesse so klein ist,
          *  dass das Callback nie laenger als ca. 1/4 Slot dauert. */
         bool preempt_audio = true;
+        /** Oversampling des ADC (2, 4, 8, 16, 32; 0 = libDaisy-Default 32).
+         *  libDaisy liest 12 Kanaele mit 32-fachem Oversampling, ein neuer
+         *  Wert an CV In 4 kommt dann nur alle ca. 1,05 ms - zu alt fuer den
+         *  Abtastzeitpunkt. Mit 8 alle ca. 0,26 ms, etwas mehr Rauschen.
+         *  Gilt fuer alle Knobs und CV-Eingaenge der Firmware. */
+        int adc_oversampling = 8;
     };
 
     /** Mit Default-Konfiguration: CV In 4 = Daten, Gate In 2 = Takt */
@@ -73,6 +79,23 @@ class PatchInitLink
         if(cfg_.timer == TimerPeriph::TIM_2)
             cfg_.timer = TimerPeriph::TIM_5;
         rx_.Init(cfg_.poll_hz, cfg_.timeout_ms);
+        if(cfg_.adc_oversampling > 0)
+            SetAdcOversampling(hw, cfg_.adc_oversampling);
+    }
+
+    /** Oversampling des Patch-SM-ADC (ADC1) aendern. Ergebnis bleibt 16 Bit:
+     *  der Rechts-Shift waechst mit. ratio = 1, 2, 4, ... 1024. */
+    static void SetAdcOversampling(daisy::patch_sm::DaisyPatchSM& hw, int ratio)
+    {
+        uint32_t shift = 0;
+        while((1 << shift) < ratio && shift < 10)
+            shift++;
+        hw.StopAdc(); // ADC aus: erst dann ist CFGR2 beschreibbar
+        MODIFY_REG(ADC1->CFGR2,
+                   ADC_CFGR2_OVSR | ADC_CFGR2_OVSS,
+                   ((uint32_t(1) << shift) - 1u) << ADC_CFGR2_OVSR_Pos
+                       | shift << ADC_CFGR2_OVSS_Pos);
+        hw.StartAdc(); // kalibriert und startet die DMA neu
     }
 
     /** Startet die Abfrage per Timer-Interrupt. */
@@ -107,6 +130,18 @@ class PatchInitLink
         BeginWrite();
         rx_.Tick(g, v);
         EndWrite();
+        if(tap_)
+            tap_(tap_ctx_, g, v);
+    }
+
+    /** Optionaler Mitschnitt: wird bei jeder Abfrage im Timer-Interrupt mit
+     *  Takt-Pegel und Spannung (V) aufgerufen. Muss kurz sein. Fuer die
+     *  Diagnose in der Monitor-Firmware. */
+    using TapCallback = void (*)(void* ctx, bool gate, float volts);
+    void SetTap(TapCallback cb, void* ctx)
+    {
+        tap_ctx_ = ctx;
+        tap_     = cb;
     }
 
     /** Konsistente Kopie des aktuellen Zustands (Stimmen, Aux, Lock). */
@@ -171,6 +206,8 @@ class PatchInitLink
     const uint16_t*    adc_  = nullptr;
     daisy::GateIn*     gate_ = nullptr;
     volatile uint32_t  seq_  = 0;
+    TapCallback        tap_     = nullptr;
+    void*              tap_ctx_ = nullptr;
 };
 
 } // namespace droid_link

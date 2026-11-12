@@ -23,4 +23,11 @@ APP_TYPE = BOOT_SRAM
 # Das Original wird mit -O2 -funroll-loops gebaut (stmlib/makefile.inc)
 OPT = -O2 -funroll-loops
 
+# make DEBUG_CPU=1: CPU-Last jede Sekunde ueber USB-Seriell ausgeben
+# (wie #define RINGS_DEBUG_CPU in main.cpp). Vorher make clean, da make
+# geaenderte Compiler-Flags nicht erkennt.
+ifeq ($(DEBUG_CPU),1)
+C_INCLUDES += -DRINGS_DEBUG_CPU
+endif
+
 include ../common.mk
